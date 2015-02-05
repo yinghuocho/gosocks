@@ -13,7 +13,7 @@ func Dial(address string, timeout time.Duration) (conn *SocksConn, err error) {
 	if err != nil {
 		return nil, err
 	}
-	conn = &SocksConn{c.(*net.TCPConn), timeout}
+	conn = &SocksConn{c.(*net.TCPConn), timeout, &dummySocksLogger{}}
 	err = ClientAuthAnonymous(conn)
 	if err != nil {
 		conn.Close()
@@ -52,6 +52,7 @@ func ClientRequest(conn *SocksConn, req *SocksRequest) (reply SocksReply, err er
 	if err != nil {
 		return
 	}
+	conn.Logger.LogSocksRequest(req)
 	conn.SetDeadline(time.Now().Add(conn.Timeout))
 	reply, err = ReadSocksReply(conn)
 	return

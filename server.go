@@ -21,6 +21,7 @@ type Server struct {
 	Addr    string
 	Timeout time.Duration
 	Handler Handler
+	Logger  SocksLogger
 }
 
 func (srv *Server) ListenAndServe() error {
@@ -58,7 +59,7 @@ func (srv *Server) Serve(ln net.Listener) error {
 			}
 		}
 		tempDelay = 0
-		go srv.Handler.ServeSocks(&SocksConn{conn.(*net.TCPConn), srv.Timeout})
+		go srv.Handler.ServeSocks(&SocksConn{conn.(*net.TCPConn), srv.Timeout, srv.Logger})
 	}
 }
 
@@ -342,7 +343,7 @@ func (h *basicSocksHandler) ServeSocks(conn *SocksConn) {
 		return
 	}
 
-	log.Printf("cmd 0x%02x with DstAddr: %s:%d", req.Cmd, req.DstHost, req.DstPort)
+	conn.Logger.LogSocksRequest(&req)
 	switch req.Cmd {
 	case SocksCmdConnect:
 		h.handleCmdConnect(&req, conn)
@@ -356,5 +357,5 @@ func (h *basicSocksHandler) ServeSocks(conn *SocksConn) {
 }
 
 func NewServer(addr string, to time.Duration) *Server {
-	return &Server{Addr: addr, Timeout: to, Handler: &basicSocksHandler{}}
+	return &Server{Addr: addr, Timeout: to, Handler: &basicSocksHandler{}, Logger: &dummySocksLogger{}}
 }

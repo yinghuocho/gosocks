@@ -34,11 +34,6 @@ const (
 	largeBufSize = 0x10000
 )
 
-type SocksConn struct {
-	*net.TCPConn
-	Timeout time.Duration
-}
-
 type SocksRequest struct {
 	Cmd      byte
 	HostType byte
@@ -67,6 +62,16 @@ type UDPRequest struct {
 	DstHost  string
 	DstPort  uint16
 	Data     []byte
+}
+
+type SocksLogger interface {
+	LogSocksRequest(*SocksRequest)
+}
+
+type SocksConn struct {
+	*net.TCPConn
+	Timeout time.Duration
+	Logger  SocksLogger
 }
 
 func ntohs(data [2]byte) uint16 {
@@ -342,4 +347,9 @@ func LegalClientAddr(clientAssociate *net.UDPAddr, addr *net.UDPAddr) bool {
 	}
 
 	return false
+}
+
+type dummySocksLogger struct{}
+
+func (logger *dummySocksLogger) LogSocksRequest(req *SocksRequest) {
 }
