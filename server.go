@@ -123,11 +123,11 @@ func copyLoopUDP(clientAssociate *net.UDPAddr, conn *SocksConn, clientConn *net.
 		close(quit)
 	}()
 
-	chClient := make(chan udpPacket)
-	chRemote := make(chan udpPacket)
+	chClient := make(chan *udpPacket)
+	chRemote := make(chan *udpPacket)
 
 	// read UPD packets
-	readFunc := func(u *net.UDPConn, ch chan<- udpPacket) {
+	readFunc := func(u *net.UDPConn, ch chan<- *udpPacket) {
 		u.SetDeadline(time.Time{})
 
 		for {
@@ -139,7 +139,7 @@ func copyLoopUDP(clientAssociate *net.UDPAddr, conn *SocksConn, clientConn *net.
 			// log.Printf("UDP from %s : len %d", addr.String(), n)
 			b := make([]byte, n)
 			copy(b, buf[:n])
-			ch <- udpPacket{addr, b}
+			ch <- &udpPacket{addr, b}
 		}
 		close(ch)
 	}
@@ -150,7 +150,7 @@ func copyLoopUDP(clientAssociate *net.UDPAddr, conn *SocksConn, clientConn *net.
 	var remoteConn *net.UDPConn = nil
 loop:
 	for {
-		var pkt udpPacket
+		var pkt *udpPacket
 		var ok bool
 
 		select {
@@ -357,5 +357,5 @@ func (h *basicSocksHandler) ServeSocks(conn *SocksConn) {
 }
 
 func NewServer(addr string, to time.Duration) *Server {
-	return &Server{Addr: addr, Timeout: to, Handler: &basicSocksHandler{}, Logger: &dummySocksLogger{}}
+	return &Server{Addr: addr, Timeout: to, Handler: &basicSocksHandler{}, Logger: &DummySocksLogger{}}
 }

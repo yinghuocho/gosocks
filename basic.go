@@ -349,7 +349,7 @@ func LegalClientAddr(clientAssociate *net.UDPAddr, addr *net.UDPAddr) bool {
 	return false
 }
 
-type dummySocksLogger struct{}
+type DummySocksLogger struct{}
 
-func (logger *dummySocksLogger) LogSocksRequest(req *SocksRequest) {
+func (logger *DummySocksLogger) LogSocksRequest(req *SocksRequest) {
 }
