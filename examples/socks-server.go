@@ -6,6 +6,6 @@ import (
 )
 
 func main() {
-	srv := gosocks.NewServer("", time.Minute)
+	srv := gosocks.NewServer(":10800", time.Minute)
 	srv.ListenAndServe()
 }

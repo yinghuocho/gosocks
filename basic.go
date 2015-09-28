@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -15,7 +16,8 @@ const (
 
 	SocksReserved = 0x00
 
-	SocksNoAuthentication = 0x00
+	SocksNoAuthentication    = 0x00
+	SocksNoAcceptableMethods = 0xFF
 
 	SocksIPv4Host   = 0x01
 	SocksIPv6Host   = 0x04
@@ -64,21 +66,16 @@ type UDPRequest struct {
 	Data     []byte
 }
 
-type SocksLogger interface {
-	LogSocksRequest(*SocksRequest)
-}
-
 type SocksConn struct {
-	*net.TCPConn
+	net.Conn
 	Timeout time.Duration
-	Logger  SocksLogger
 }
 
-func ntohs(data [2]byte) uint16 {
+func Ntohs(data [2]byte) uint16 {
 	return uint16(data[0])<<8 | uint16(data[1])<<0
 }
 
-func htons(data uint16) (ret [2]byte) {
+func Htons(data uint16) (ret [2]byte) {
 	ret[0] = byte((data >> 8) & 0xff)
 	ret[1] = byte((data >> 0) & 0xff)
 	return
@@ -99,6 +96,25 @@ func SocksAddrToNetAddr(nw, host string, port uint16) net.Addr {
 	}
 
 	return addr
+}
+
+func ParseHost(host string) (byte, string) {
+	i := strings.LastIndex(host, "%")
+	s := host
+	if i > 0 {
+		s = host[:i]
+	}
+
+	ip := net.ParseIP(s)
+	if ip != nil {
+		if len(ip) == 16 {
+			return SocksIPv6Host, s
+		} else {
+			return SocksIPv4Host, s
+		}
+	} else {
+		return SocksDomainHost, s
+	}
 }
 
 func NetAddrToSocksAddr(addr interface{}) (hostType byte, host string, port uint16) {
@@ -181,7 +197,7 @@ func readSocksPort(r io.Reader) (port uint16, err error) {
 		return
 	}
 
-	port = ntohs(buf)
+	port = Ntohs(buf)
 	return
 }
 
@@ -258,7 +274,7 @@ func writeSocksComm(w io.Writer, data *socksCommon) (n int, err error) {
 		return
 	}
 	buf = append(buf, h...)
-	p := htons(data.Port)
+	p := Htons(data.Port)
 	buf = append(buf, p[:]...)
 
 	n, err = w.Write(buf)
@@ -279,23 +295,18 @@ func WriteSocksRequest(w io.Writer, req *SocksRequest) (n int, err error) {
 	return writeSocksComm(w, data)
 }
 
-func ReadSocksReply(r io.Reader) (reply SocksReply, err error) {
+func ReadSocksReply(r io.Reader) (reply *SocksReply, err error) {
 	data, err := readSocksComm(r)
 	if err != nil {
 		return
 	}
-	reply = SocksReply{data.Flag, data.HostType, data.Host, data.Port}
+	reply = &SocksReply{data.Flag, data.HostType, data.Host, data.Port}
 	return
 }
 
 func WriteSocksReply(w io.Writer, reply *SocksReply) (n int, err error) {
 	data := &socksCommon{reply.Rep, reply.HostType, reply.BndHost, reply.BndPort}
 	return writeSocksComm(w, data)
-}
-
-type udpPacket struct {
-	addr *net.UDPAddr
-	data []byte
 }
 
 func ParseUDPRequest(data []byte) (udpReq *UDPRequest, err error) {
@@ -331,7 +342,7 @@ func PackUDPRequest(udpReq *UDPRequest) []byte {
 	buf[3] = udpReq.HostType
 	h, _ := packSocksHost(udpReq.HostType, udpReq.DstHost)
 	buf = append(buf, h...)
-	p := htons(udpReq.DstPort)
+	p := Htons(udpReq.DstPort)
 	buf = append(buf, p[:]...)
 	buf = append(buf, udpReq.Data...)
 	return buf
@@ -347,9 +358,4 @@ func LegalClientAddr(clientAssociate *net.UDPAddr, addr *net.UDPAddr) bool {
 	}
 
 	return false
-}
-
-type DummySocksLogger struct{}
-
-func (logger *DummySocksLogger) LogSocksRequest(req *SocksRequest) {
 }
