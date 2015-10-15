@@ -13,11 +13,8 @@ const (
 	DefaultPort = 1080
 )
 
-type SocksRequestIntercepter func(*SocksRequest, *SocksConn) bool
-
 type Handler interface {
 	ServeSocks(conn *SocksConn)
-	AddSocksRequestIntercepter(SocksRequestIntercepter)
 }
 
 type ServerAuthenticator interface {
@@ -25,19 +22,21 @@ type ServerAuthenticator interface {
 }
 
 type Server struct {
-	Addr    string
-	Timeout time.Duration
-	Handler Handler
-	Auth    ServerAuthenticator
+	addr    string
+	timeout time.Duration
+	handler Handler
+	auth    ServerAuthenticator
+	msgCh   chan interface{}
+	quit    chan bool
 }
 
-type UdpPacket struct {
+type UDPPacket struct {
 	Addr *net.UDPAddr
 	Data []byte
 }
 
-func (srv *Server) ListenAndServe() error {
-	addr := srv.Addr
+func (svr *Server) ListenAndServe() error {
+	addr := svr.addr
 	if addr == "" {
 		addr = fmt.Sprintf(":%d", DefaultPort)
 	}
@@ -45,38 +44,93 @@ func (srv *Server) ListenAndServe() error {
 	if err != nil {
 		return err
 	}
-	return srv.Serve(ln)
+	defer ln.Close()
+	return svr.Serve(ln)
 }
 
-func (srv *Server) Serve(ln net.Listener) error {
-	defer ln.Close()
+func (svr *Server) GetTimeout() time.Duration {
+	return svr.timeout
+}
 
-	var tempDelay time.Duration // how long to sleep on accept failure
-	for {
-		conn, e := ln.Accept()
-		if e != nil {
-			if ne, ok := e.(net.Error); ok && ne.Temporary() {
-				if tempDelay == 0 {
-					tempDelay = 5 * time.Millisecond
+// safely change authenticator when server is running
+func (svr *Server) ChangeAuth(auth ServerAuthenticator) {
+	select {
+	case svr.msgCh <- auth:
+	case <-svr.quit:
+	}
+}
+
+func (svr *Server) ChangeHandler(handler Handler) {
+	select {
+	case svr.msgCh <- handler:
+	case <-svr.quit:
+	}
+}
+
+type ret struct {
+	conn net.Conn
+	err  error
+}
+
+func (svr *Server) Serve(ln net.Listener) error {
+	// close quit channel after loop ends, so that attempts to change
+	// authenticator or handler do not block.
+	defer close(svr.quit)
+
+	ch := make(chan ret)
+	go func() {
+		// how long to sleep on accept failure
+		var tempDelay time.Duration
+		for {
+			conn, e := ln.Accept()
+			if e != nil {
+				if ne, ok := e.(net.Error); ok && ne.Temporary() {
+					if tempDelay == 0 {
+						tempDelay = 5 * time.Millisecond
+					} else {
+						tempDelay *= 2
+					}
+					if max := 1 * time.Second; tempDelay > max {
+						tempDelay = max
+					}
+					time.Sleep(tempDelay)
+					continue
 				} else {
-					tempDelay *= 2
+					ch <- ret{nil, e}
+					return
 				}
-				if max := 1 * time.Second; tempDelay > max {
-					tempDelay = max
+			}
+			tempDelay = 0
+			ch <- ret{conn, e}
+		}
+	}()
+
+	for {
+		select {
+		case r := <-ch:
+			if r.err != nil {
+				return r.err
+			}
+
+			go func(c net.Conn, to time.Duration, auth ServerAuthenticator, handler Handler) {
+				socks := &SocksConn{c, to}
+				// if svr.Auth is nil, Handler should process authenticate.
+				if auth != nil {
+					if auth.ServerAuthenticate(socks) != nil {
+						socks.Close()
+						return
+					}
 				}
-				time.Sleep(tempDelay)
-				continue
-			} else {
-				return e
+				handler.ServeSocks(socks)
+			}(r.conn, svr.timeout, svr.auth, svr.handler)
+		case msg := <-svr.msgCh:
+			switch msg.(type) {
+			case ServerAuthenticator:
+				svr.auth = msg.(ServerAuthenticator)
+			case Handler:
+				svr.handler = msg.(Handler)
 			}
 		}
-		tempDelay = 0
-		socks := &SocksConn{conn.(*net.TCPConn), srv.Timeout}
-		if srv.Auth.ServerAuthenticate(socks) != nil {
-			socks.Close()
-			continue
-		}
-		go srv.Handler.ServeSocks(socks)
 	}
 }
 
@@ -117,15 +171,9 @@ func (a *AnonymousServerAuthenticator) ServerAuthenticate(conn *SocksConn) (err 
 	return fmt.Errorf("NoAuthentication(0x%02x) not found in claimed methods", SocksNoAuthentication)
 }
 
-type BasicSocksHandler struct {
-	intercepters []SocksRequestIntercepter
-}
+type BasicSocksHandler struct{}
 
-func (h *BasicSocksHandler) AddSocksRequestIntercepter(l SocksRequestIntercepter) {
-	h.intercepters = append(h.intercepters, l)
-}
-
-func (h *BasicSocksHandler) handleCmdConnect(req *SocksRequest, conn *SocksConn) {
+func (h *BasicSocksHandler) HandleCmdConnect(req *SocksRequest, conn *SocksConn) {
 	addr := SockAddrString(req.DstHost, req.DstPort)
 	remote, err := net.DialTimeout("tcp", addr, conn.Timeout)
 	if err != nil {
@@ -148,7 +196,7 @@ func (h *BasicSocksHandler) handleCmdConnect(req *SocksRequest, conn *SocksConn)
 	log.Printf("TCP connection done")
 }
 
-func (h *BasicSocksHandler) handleCmdUDPAssociate(req *SocksRequest, conn *SocksConn) {
+func (h *BasicSocksHandler) HandleCmdUDPAssociate(req *SocksRequest, conn *SocksConn) {
 	socksAddr := conn.LocalAddr().(*net.TCPAddr)
 	clientBind, err := net.ListenUDP("udp", &net.UDPAddr{socksAddr.IP, 0, socksAddr.Zone})
 	if err != nil {
@@ -172,17 +220,17 @@ func (h *BasicSocksHandler) handleCmdUDPAssociate(req *SocksRequest, conn *Socks
 	log.Printf("UDP connection done")
 }
 
-func UdpReader(u *net.UDPConn, ch chan<- *UdpPacket) {
+func UDPReader(u *net.UDPConn, ch chan<- *UDPPacket) {
 	u.SetDeadline(time.Time{})
+	var buf [largeBufSize]byte
 	for {
-		var buf [largeBufSize]byte
 		n, addr, err := u.ReadFromUDP(buf[:])
 		if err != nil {
 			break
 		}
 		b := make([]byte, n)
 		copy(b, buf[:n])
-		ch <- &UdpPacket{addr, b}
+		ch <- &UDPPacket{addr, b}
 	}
 	close(ch)
 }
@@ -201,18 +249,18 @@ func CopyLoopUDP(client *SocksConn, clientAssociate *net.UDPAddr, clientUDP *net
 	quit := make(chan bool)
 	go ConnMonitor(client, quit)
 
-	chClientUDP := make(chan *UdpPacket)
-	chRemoteUDP := make(chan *UdpPacket)
+	chClientUDP := make(chan *UDPPacket)
+	chRemoteUDP := make(chan *UDPPacket)
 
 	// read UPD packets
-	go UdpReader(clientUDP, chClientUDP)
+	go UDPReader(clientUDP, chClientUDP)
 
 	// clientAddress initially set to clientAssociate
 	var clientAddr *net.UDPAddr = clientAssociate
 	var remoteUDP *net.UDPConn = nil
 loop:
 	for {
-		var pkt *UdpPacket
+		var pkt *UDPPacket
 		var ok bool
 		t := time.NewTimer(client.Timeout)
 
@@ -254,7 +302,7 @@ loop:
 				uaddr.Port = 0
 				c.Close()
 				remoteUDP, _ = net.ListenUDP("udp", uaddr)
-				go UdpReader(remoteUDP, chRemoteUDP)
+				go UDPReader(remoteUDP, chRemoteUDP)
 			}
 			// relay payload to remoteAddr using remoteBind
 			_, err = remoteUDP.WriteToUDP(udpReq.Data, remoteAddr)
@@ -302,52 +350,44 @@ loop:
 }
 
 func CopyLoopTimeout(c1 net.Conn, c2 net.Conn, timeout time.Duration) {
-	ch1 := make(chan []byte)
-	ch2 := make(chan []byte)
-
-	reader := func(c net.Conn, ch chan<- []byte) {
-		c.SetDeadline(time.Time{})
-
+	ch1 := make(chan bool, 5)
+	ch2 := make(chan bool, 5)
+	copyer := func(src net.Conn, dst net.Conn, ch chan<- bool) {
 		var buf [largeBufSize]byte
-		r := bufio.NewReader(c)
 		for {
-			n, err := r.Read(buf[:])
-			if n > 0 {
-				b := make([]byte, n)
-				copy(b, buf[:n])
-				ch <- b
+			nr, er := src.Read(buf[:])
+			if nr > 0 {
+				nw, ew := dst.Write(buf[0:nr])
+				if ew != nil {
+					break
+				}
+				if nr != nw {
+					break
+				}
+				ch <- true
 			}
-			if err != nil {
+			if er != nil {
 				break
 			}
 		}
 		close(ch)
 	}
 
-	go reader(c1, ch1)
-	go reader(c2, ch2)
+	go copyer(c1, c2, ch1)
+	go copyer(c2, c1, ch2)
 
 loop:
 	for {
 		t := time.NewTimer(timeout)
-		var buf []byte
 		var ok bool
 		select {
-		case buf, ok = <-ch1:
+		case _, ok = <-ch1:
 			if !ok {
-				break loop
-			}
-			_, err := c2.Write(buf)
-			if err != nil {
 				break loop
 			}
 
-		case buf, ok = <-ch2:
+		case _, ok = <-ch2:
 			if !ok {
-				break loop
-			}
-			_, err := c1.Write(buf)
-			if err != nil {
 				break loop
 			}
 
@@ -357,13 +397,8 @@ loop:
 		}
 		t.Stop()
 	}
-
 	c1.Close()
 	c2.Close()
-	// readeres may block on writing, try read to wake them so they
-	// are aware that the underlying connection has closed.
-	<-ch1
-	<-ch2
 }
 
 func (h *BasicSocksHandler) ServeSocks(conn *SocksConn) {
@@ -374,17 +409,13 @@ func (h *BasicSocksHandler) ServeSocks(conn *SocksConn) {
 		return
 	}
 
-	for _, f := range h.intercepters {
-		if f(&req, conn) {
-			return
-		}
-	}
-
 	switch req.Cmd {
 	case SocksCmdConnect:
-		h.handleCmdConnect(&req, conn)
+		h.HandleCmdConnect(&req, conn)
+		return
 	case SocksCmdUDPAssociate:
-		h.handleCmdUDPAssociate(&req, conn)
+		h.HandleCmdUDPAssociate(&req, conn)
+		return
 	case SocksCmdBind:
 		conn.Close()
 		return
@@ -393,11 +424,24 @@ func (h *BasicSocksHandler) ServeSocks(conn *SocksConn) {
 	}
 }
 
-func NewServer(addr string, to time.Duration) *Server {
+func NewBasicServer(addr string, to time.Duration) *Server {
 	return &Server{
-		Addr:    addr,
-		Timeout: to,
-		Handler: &BasicSocksHandler{},
-		Auth:    &AnonymousServerAuthenticator{},
+		addr:    addr,
+		timeout: to,
+		handler: &BasicSocksHandler{},
+		auth:    &AnonymousServerAuthenticator{},
+		msgCh:   make(chan interface{}),
+		quit:    make(chan bool),
+	}
+}
+
+func NewServer(addr string, to time.Duration, handler Handler, auth ServerAuthenticator) *Server {
+	return &Server{
+		addr:    addr,
+		timeout: to,
+		handler: handler,
+		auth:    auth,
+		msgCh:   make(chan interface{}),
+		quit:    make(chan bool),
 	}
 }

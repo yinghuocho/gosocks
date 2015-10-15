@@ -1,11 +1,11 @@
 package main
 
 import (
-	"time"
 	"github.com/yinghuocho/gosocks"
+	"time"
 )
 
 func main() {
-	srv := gosocks.NewServer(":10800", time.Minute)
+	srv := gosocks.NewBasicServer(":10800", time.Minute)
 	srv.ListenAndServe()
 }
