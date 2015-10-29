@@ -44,7 +44,7 @@ func (a *AnonymousClientAuthenticator) ClientAuthenticate(conn *SocksConn) (err 
 	return
 }
 
-func (d *SocksDialer) Dial(network, address string) (conn *SocksConn, err error) {
+func (d *SocksDialer) Dial(address string) (conn *SocksConn, err error) {
 	c, err := net.DialTimeout("tcp", address, d.Timeout)
 	if err != nil {
 		return
