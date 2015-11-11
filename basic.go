@@ -106,15 +106,17 @@ func ParseHost(host string) (byte, string) {
 	}
 
 	ip := net.ParseIP(s)
+	var t byte
 	if ip != nil {
 		if len(ip) == 16 {
-			return SocksIPv6Host, s
+			t = SocksIPv6Host
 		} else {
-			return SocksIPv4Host, s
+			t = SocksIPv4Host
 		}
 	} else {
-		return SocksDomainHost, s
+		t = SocksDomainHost
 	}
+	return t, s
 }
 
 func NetAddrToSocksAddr(addr interface{}) (hostType byte, host string, port uint16) {
@@ -208,25 +210,23 @@ func packSocksHost(hostType byte, host string) (data []byte, err error) {
 		if ip == nil {
 			err = fmt.Errorf("Invalid host %s", host)
 			return
-		} else {
-			data = ip.To4()
-			return
 		}
+		data = ip.To4()
+		return
 	case SocksIPv6Host:
 		ip := net.ParseIP(host)
 		if ip == nil {
 			err = fmt.Errorf("Invalid host %s", host)
 			return
-		} else {
-			data = ip.To16()
-			return
 		}
+		data = ip.To16()
+		return
 	case SocksDomainHost:
 		data = append(data, byte(len(host)))
 		data = append(data, []byte(host)...)
 		return
 	default:
-		fmt.Errorf("Unknown address type 0x%02x", hostType)
+		err = fmt.Errorf("Unknown address type 0x%02x", hostType)
 		return
 	}
 }
@@ -281,12 +281,12 @@ func writeSocksComm(w io.Writer, data *socksCommon) (n int, err error) {
 	return
 }
 
-func ReadSocksRequest(r io.Reader) (req SocksRequest, err error) {
+func ReadSocksRequest(r io.Reader) (req *SocksRequest, err error) {
 	data, err := readSocksComm(r)
 	if err != nil {
 		return
 	}
-	req = SocksRequest{data.Flag, data.HostType, data.Host, data.Port}
+	req = &SocksRequest{data.Flag, data.HostType, data.Host, data.Port}
 	return
 }
 
@@ -302,6 +302,14 @@ func ReadSocksReply(r io.Reader) (reply *SocksReply, err error) {
 	}
 	reply = &SocksReply{data.Flag, data.HostType, data.Host, data.Port}
 	return
+}
+
+func ReplyGeneralFailure(w io.Writer, req *SocksRequest) (n int, err error) {
+	host := "0.0.0.0"
+	if req.HostType == SocksIPv6Host {
+		host = "::"
+	}
+	return WriteSocksReply(w, &SocksReply{SocksGeneralFailure, SocksIPv4Host, host, 0})
 }
 
 func WriteSocksReply(w io.Writer, reply *SocksReply) (n int, err error) {
