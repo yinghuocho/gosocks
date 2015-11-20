@@ -20,8 +20,7 @@ type SocksDialer struct {
 type AnonymousClientAuthenticator struct{}
 
 func (a *AnonymousClientAuthenticator) ClientAuthenticate(conn *SocksConn) (err error) {
-	conn.SetDeadline(time.Now().Add(conn.Timeout))
-
+	conn.SetWriteDeadline(time.Now().Add(conn.Timeout))
 	var req [3]byte
 	req[0] = SocksVersion
 	req[1] = 1
@@ -31,6 +30,7 @@ func (a *AnonymousClientAuthenticator) ClientAuthenticate(conn *SocksConn) (err 
 		return
 	}
 
+	conn.SetReadDeadline(time.Now().Add(conn.Timeout))
 	var resp [2]byte
 	r := bufio.NewReader(conn)
 	_, err = io.ReadFull(r, resp[:2])
@@ -59,8 +59,7 @@ func (d *SocksDialer) Dial(address string) (conn *SocksConn, err error) {
 }
 
 func ClientAuthAnonymous(conn *SocksConn) (err error) {
-	conn.SetDeadline(time.Now().Add(conn.Timeout))
-
+	conn.SetWriteDeadline(time.Now().Add(conn.Timeout))
 	var req [3]byte
 	req[0] = SocksVersion
 	req[1] = 1
@@ -70,6 +69,7 @@ func ClientAuthAnonymous(conn *SocksConn) (err error) {
 		return
 	}
 
+	conn.SetReadDeadline(time.Now().Add(conn.Timeout))
 	var resp [2]byte
 	r := bufio.NewReader(conn)
 	_, err = io.ReadFull(r, resp[:2])
@@ -84,11 +84,12 @@ func ClientAuthAnonymous(conn *SocksConn) (err error) {
 }
 
 func ClientRequest(conn *SocksConn, req *SocksRequest) (reply *SocksReply, err error) {
+	conn.SetWriteDeadline(time.Now().Add(conn.Timeout))
 	_, err = WriteSocksRequest(conn, req)
 	if err != nil {
 		return
 	}
-	conn.SetDeadline(time.Now().Add(conn.Timeout))
+	conn.SetReadDeadline(time.Now().Add(conn.Timeout))
 	reply, err = ReadSocksReply(conn)
 	return
 }

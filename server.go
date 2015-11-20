@@ -113,7 +113,7 @@ func (svr *Server) Serve(ln net.Listener) error {
 			}
 
 			go func(c net.Conn, to time.Duration, auth ServerAuthenticator, handler Handler) {
-				socks := &SocksConn{c, to}
+				socks := &SocksConn{Conn: c, Timeout: to}
 				// if svr.Auth is nil, Handler should process authenticate.
 				if auth != nil {
 					if auth.ServerAuthenticate(socks) != nil {
@@ -137,8 +137,7 @@ func (svr *Server) Serve(ln net.Listener) error {
 type AnonymousServerAuthenticator struct{}
 
 func (a *AnonymousServerAuthenticator) ServerAuthenticate(conn *SocksConn) (err error) {
-	conn.SetDeadline(time.Now().Add(conn.Timeout))
-
+	conn.SetReadDeadline(time.Now().Add(conn.Timeout))
 	var h [smallBufSize]byte
 	r := bufio.NewReader(conn)
 	_, err = io.ReadFull(r, h[:2])
@@ -157,6 +156,7 @@ func (a *AnonymousServerAuthenticator) ServerAuthenticate(conn *SocksConn) (err 
 		return
 	}
 
+	conn.SetWriteDeadline(time.Now().Add(conn.Timeout))
 	var buf [2]byte
 	buf[0] = SocksVersion
 	for i := 0; i < n; i++ {
@@ -167,8 +167,11 @@ func (a *AnonymousServerAuthenticator) ServerAuthenticate(conn *SocksConn) (err 
 		}
 	}
 	buf[1] = SocksNoAcceptableMethods
-	conn.Write(buf[:])
-	return fmt.Errorf("NoAuthentication(0x%02x) not found in claimed methods", SocksNoAuthentication)
+	_, err = conn.Write(buf[:])
+	if err == nil {
+		err = fmt.Errorf("NoAuthentication(0x%02x) not found in claimed methods", SocksNoAuthentication)
+	}
+	return
 }
 
 type BasicSocksHandler struct{}
@@ -185,6 +188,7 @@ func (h *BasicSocksHandler) HandleCmdConnect(req *SocksRequest, conn *SocksConn)
 
 	localAddr := remote.LocalAddr()
 	hostType, host, port := NetAddrToSocksAddr(localAddr)
+	conn.SetWriteDeadline(time.Now().Add(conn.Timeout))
 	_, err = WriteSocksReply(conn, &SocksReply{SocksSucceeded, hostType, host, port})
 	if err != nil {
 		log.Printf("error in sending reply: %s", err)
@@ -213,6 +217,7 @@ func (h *BasicSocksHandler) UDPAssociateFirstPacket(req *SocksRequest, conn *Soc
 	bindAddr := clientBind.LocalAddr()
 	hostType, host, port := NetAddrToSocksAddr(bindAddr)
 	log.Printf("UDP bind local address: %s", bindAddr.String())
+	conn.SetWriteDeadline(time.Now().Add(conn.Timeout))
 	_, err = WriteSocksReply(conn, &SocksReply{SocksSucceeded, hostType, host, port})
 	if err != nil {
 		log.Printf("error in sending reply: %s", err)
@@ -530,6 +535,9 @@ loop:
 }
 
 func CopyLoopTimeout(c1 net.Conn, c2 net.Conn, timeout time.Duration) {
+	c1.SetReadDeadline(time.Time{})
+	c2.SetReadDeadline(time.Time{})
+
 	ch1 := make(chan bool, 5)
 	ch2 := make(chan bool, 5)
 	copyer := func(src net.Conn, dst net.Conn, ch chan<- bool) {
