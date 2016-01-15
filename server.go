@@ -15,6 +15,7 @@ const (
 
 type Handler interface {
 	ServeSocks(conn *SocksConn)
+	Quit()
 }
 
 type ServerAuthenticator interface {
@@ -75,7 +76,10 @@ type ret struct {
 func (svr *Server) Serve(ln net.Listener) error {
 	// close quit channel after loop ends, so that attempts to change
 	// authenticator or handler do not block.
-	defer close(svr.quit)
+	defer func() {
+		close(svr.quit)
+		svr.handler.Quit()
+	}()
 
 	ch := make(chan ret)
 	go func() {
@@ -180,7 +184,7 @@ func (h *BasicSocksHandler) HandleCmdConnect(req *SocksRequest, conn *SocksConn)
 	addr := SockAddrString(req.DstHost, req.DstPort)
 	remote, err := net.DialTimeout("tcp", addr, conn.Timeout)
 	if err != nil {
-		log.Printf("error in connecting remote target: %s", err)
+		log.Printf("error in connecting remote target %s: %s", addr, err)
 		ReplyGeneralFailure(conn, req)
 		conn.Close()
 		return
@@ -588,6 +592,8 @@ loop:
 	c1.Close()
 	c2.Close()
 }
+
+func (h *BasicSocksHandler) Quit() {}
 
 func (h *BasicSocksHandler) ServeSocks(conn *SocksConn) {
 	conn.SetReadDeadline(time.Now().Add(conn.Timeout))
