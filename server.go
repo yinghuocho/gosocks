@@ -182,6 +182,7 @@ type BasicSocksHandler struct{}
 
 func (h *BasicSocksHandler) HandleCmdConnect(req *SocksRequest, conn *SocksConn) {
 	addr := SockAddrString(req.DstHost, req.DstPort)
+	log.Printf("connect: %s", addr)
 	remote, err := net.DialTimeout("tcp", addr, conn.Timeout)
 	if err != nil {
 		log.Printf("error in connecting remote target %s: %s", addr, err)
@@ -205,6 +206,7 @@ func (h *BasicSocksHandler) HandleCmdConnect(req *SocksRequest, conn *SocksConn)
 }
 
 func (h *BasicSocksHandler) UDPAssociateFirstPacket(req *SocksRequest, conn *SocksConn) (*net.UDPConn, *net.UDPAddr, *UDPRequest, *net.UDPAddr, error) {
+	log.Printf("udp associate: %s:%d", req.DstHost, req.DstPort)
 	socksAddr := conn.LocalAddr().(*net.TCPAddr)
 	// create one UDP to recv/send packets from client
 	clientBind, err := net.ListenUDP("udp", &net.UDPAddr{
@@ -538,14 +540,40 @@ loop:
 	<-chRemoteUDP
 }
 
+type timeoutConn struct {
+	c net.Conn
+	t time.Duration
+}
+
+func (tc timeoutConn) Read(buf []byte) (int, error) {
+	tc.c.SetDeadline(time.Now().Add(tc.t))
+	return tc.c.Read(buf)
+}
+
+func (tc timeoutConn) Write(buf []byte) (int, error) {
+	tc.c.SetDeadline(time.Now().Add(tc.t))
+	return tc.c.Write(buf)
+}
+
 func CopyLoopTimeout(c1 net.Conn, c2 net.Conn, timeout time.Duration) {
+	tc1 := timeoutConn{c: c1, t: timeout}
+	tc2 := timeoutConn{c: c2, t: timeout}
+	go io.Copy(tc1, tc2)
+	io.Copy(tc2, tc1)
+	c1.Close()
+	c2.Close()
+}
+
+// legacy code
+func CopyLoopTimeout1(c1 net.Conn, c2 net.Conn, timeout time.Duration) {
 	c1.SetReadDeadline(time.Time{})
 	c2.SetReadDeadline(time.Time{})
 
 	ch1 := make(chan bool, 5)
 	ch2 := make(chan bool, 5)
 	copyer := func(src net.Conn, dst net.Conn, ch chan<- bool) {
-		var buf [largeBufSize]byte
+		// larger buffer when piping between two connections
+		var buf [largeBufSize * 1.75]byte
 		for {
 			nr, er := src.Read(buf[:])
 			if nr > 0 {

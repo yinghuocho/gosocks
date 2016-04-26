@@ -262,7 +262,8 @@ func readSocksComm(r io.Reader) (data socksCommon, err error) {
 }
 
 func writeSocksComm(w io.Writer, data *socksCommon) (n int, err error) {
-	buf := make([]byte, 4, smallBufSize)
+	// buf := make([]byte, 4, smallBufSize)
+	var buf [smallBufSize]byte
 
 	buf[0] = SocksVersion
 	buf[1] = data.Flag
@@ -273,11 +274,13 @@ func writeSocksComm(w io.Writer, data *socksCommon) (n int, err error) {
 	if err != nil {
 		return
 	}
-	buf = append(buf, h...)
+	copy(buf[4:], h)
+	// buf = append(buf, h...)
 	p := Htons(data.Port)
-	buf = append(buf, p[:]...)
+	// buf = append(buf, p[:]...)
+	copy(buf[(4+len(h)):], p[:])
 
-	n, err = w.Write(buf)
+	n, err = w.Write(buf[0 : 4+len(h)+2])
 	return
 }
 
