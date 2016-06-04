@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -555,13 +556,26 @@ func (tc timeoutConn) Write(buf []byte) (int, error) {
 	return tc.c.Write(buf)
 }
 
+func (tc timeoutConn) Close() {
+	tc.c.Close()
+}
+
 func CopyLoopTimeout(c1 net.Conn, c2 net.Conn, timeout time.Duration) {
 	tc1 := timeoutConn{c: c1, t: timeout}
 	tc2 := timeoutConn{c: c2, t: timeout}
-	go io.Copy(tc1, tc2)
-	io.Copy(tc2, tc1)
-	c1.Close()
-	c2.Close()
+	var wg sync.WaitGroup
+	copyer := func(dst timeoutConn, src timeoutConn) {
+		defer wg.Done()
+		_, e := io.Copy(dst, src)
+		dst.Close()
+		if e != nil {
+			src.Close()
+		}
+	}
+	wg.Add(2)
+	go copyer(tc1, tc2)
+	go copyer(tc2, tc1)
+	wg.Wait()
 }
 
 // legacy code
