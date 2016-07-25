@@ -199,6 +199,7 @@ func (h *BasicSocksHandler) HandleCmdConnect(req *SocksRequest, conn *SocksConn)
 	if err != nil {
 		log.Printf("error in sending reply: %s", err)
 		conn.Close()
+		remote.Close()
 		return
 	}
 
@@ -294,11 +295,11 @@ func (h *BasicSocksHandler) UDPAssociateForwarding(conn *SocksConn, clientBind *
 
 	// read client UPD packets
 	chClientUDP := make(chan *UDPPacket)
-	go UDPReader(clientBind, chClientUDP)
+	go UDPReader(clientBind, chClientUDP, quit)
 
 	// read remote UPD packets
 	chRemoteUDP := make(chan *UDPPacket)
-	go UDPReader(forwardingBind, chRemoteUDP)
+	go UDPReader(forwardingBind, chRemoteUDP, quit)
 
 loop:
 	for {
@@ -382,163 +383,32 @@ func (h *BasicSocksHandler) HandleCmdUDPAssociate(req *SocksRequest, conn *Socks
 	log.Printf("UDP connection done")
 }
 
-// legacy code
-func (h *BasicSocksHandler) handleCmdUDPAssociate2(req *SocksRequest, conn *SocksConn) {
-	socksAddr := conn.LocalAddr().(*net.TCPAddr)
-	// create one UDP to recv/send packets from client
-	clientBind, err := net.ListenUDP("udp", &net.UDPAddr{
-		IP:   socksAddr.IP,
-		Port: 0,
-		Zone: socksAddr.Zone,
-	})
-	if err != nil {
-		log.Printf("error in binding local UDP: %s", err)
-		ReplyGeneralFailure(conn, req)
-		conn.Close()
-		return
-	}
-
-	bindAddr := clientBind.LocalAddr()
-	hostType, host, port := NetAddrToSocksAddr(bindAddr)
-	log.Printf("UDP bind local address: %s", bindAddr.String())
-	_, err = WriteSocksReply(conn, &SocksReply{SocksSucceeded, hostType, host, port})
-	if err != nil {
-		log.Printf("error in sending reply: %s", err)
-		conn.Close()
-		return
-	}
-	clientAssociate := SocksAddrToNetAddr("udp", req.DstHost, req.DstPort).(*net.UDPAddr)
-	copyLoopUDP(conn, clientAssociate, clientBind)
-	log.Printf("UDP connection done")
-}
-
-func UDPReader(u *net.UDPConn, ch chan<- *UDPPacket) {
+func UDPReader(u *net.UDPConn, ch chan<- *UDPPacket, quit chan bool) {
 	u.SetDeadline(time.Time{})
 	var buf [largeBufSize]byte
+loop:
 	for {
 		n, addr, err := u.ReadFromUDP(buf[:])
 		if err != nil {
-			break
+			break loop
 		}
 		b := make([]byte, n)
 		copy(b, buf[:n])
-		ch <- &UDPPacket{addr, b}
+		select {
+		case ch <- &UDPPacket{addr, b}:
+		case <-quit:
+			break loop
+		}
 	}
 	close(ch)
 }
 
-func ConnMonitor(c net.Conn, ch chan bool) {
+func ConnMonitor(c net.Conn, quit chan bool) {
 	var buf [1]byte
 	c.SetDeadline(time.Time{})
 	r := bufio.NewReader(c)
 	r.Read(buf[:])
-	close(ch)
-}
-
-// legacy code
-func copyLoopUDP(client *SocksConn, clientAssociate *net.UDPAddr, clientBind *net.UDPConn) {
-	// monitoring socks connection, quit for any reading event
-	quit := make(chan bool)
-	go ConnMonitor(client, quit)
-
-	chClientUDP := make(chan *UDPPacket)
-	chRemoteUDP := make(chan *UDPPacket)
-
-	// read UPD packets
-	go UDPReader(clientBind, chClientUDP)
-
-	// clientAddress initially set to clientAssociate
-	clientAddr := clientAssociate
-	var forwardingBind *net.UDPConn
-loop:
-	for {
-		t := time.NewTimer(client.Timeout)
-		select {
-		// packets from client
-		case pkt, ok := <-chClientUDP:
-			t.Stop()
-			if !ok {
-				break loop
-			}
-			// validation
-			// 1) RFC1928 Section-7
-			if !LegalClientAddr(clientAssociate, pkt.Addr) {
-				continue
-			}
-			// 2) format
-			udpReq, err := ParseUDPRequest(pkt.Data)
-			if err != nil {
-				log.Printf("error to parse UDP packet: %s", err)
-				break loop
-			}
-			// 3) no fragment
-			if udpReq.Frag != SocksNoFragment {
-				continue
-			}
-
-			// update clientAddr (not required)
-			clientAddr = pkt.Addr
-			forwardingAddr := SocksAddrToNetAddr("udp", udpReq.DstHost, udpReq.DstPort).(*net.UDPAddr)
-			if forwardingBind == nil {
-				// first packet, try to create a remoteBind to relay packet to remote
-				//     1) use Dial to get correct peering IP;
-				//     2) create unconnected UDP socket in order to use WriteToUDP.
-				c, err := net.DialUDP("udp", nil, forwardingAddr)
-				if err != nil {
-					log.Printf("error to connect UDP target (%s):%s", forwardingAddr.String(), err)
-					break loop
-				}
-				uaddr := c.LocalAddr().(*net.UDPAddr)
-				uaddr.Port = 0
-				c.Close()
-				forwardingBind, _ = net.ListenUDP("udp", uaddr)
-				go UDPReader(forwardingBind, chRemoteUDP)
-			}
-			// relay payload to remoteAddr using remoteBind
-			_, err = forwardingBind.WriteToUDP(udpReq.Data, forwardingAddr)
-			if err != nil {
-				log.Printf("error to send UDP packet to remote: %s", err)
-				break loop
-			}
-
-		// packets from remote
-		case pkt, ok := <-chRemoteUDP:
-			t.Stop()
-			if !ok {
-				break loop
-			}
-
-			hostType, host, port := NetAddrToSocksAddr(pkt.Addr)
-			data := PackUDPRequest(&UDPRequest{SocksNoFragment, hostType, host, port, pkt.Data})
-			_, err := clientBind.WriteToUDP(data, clientAddr)
-			if err != nil {
-				log.Printf("error to send UDP packet to client: %s", err)
-				break loop
-			}
-
-		case <-quit:
-			t.Stop()
-			log.Printf("UDP unexpected event from socks connection")
-			break loop
-
-		case <-t.C:
-			log.Printf("UDP timeout")
-			break loop
-		}
-		t.Stop()
-	}
-
-	client.Close()
-	clientBind.Close()
-	if forwardingBind != nil {
-		forwardingBind.Close()
-	} else {
-		close(chRemoteUDP)
-	}
-	// readeres may block on writing, try read to wake them so they
-	// are aware that the underlying connection has closed.
-	<-chClientUDP
-	<-chRemoteUDP
+	close(quit)
 }
 
 type timeoutConn struct {
