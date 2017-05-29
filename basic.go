@@ -108,7 +108,7 @@ func ParseHost(host string) (byte, string) {
 	ip := net.ParseIP(s)
 	var t byte
 	if ip != nil {
-		if len(ip) == 16 {
+		if ip.To16() != nil {
 			t = SocksIPv6Host
 		} else {
 			t = SocksIPv4Host
@@ -324,23 +324,25 @@ func ParseUDPRequest(data []byte) (udpReq *UDPRequest, err error) {
 	udpReq = &UDPRequest{}
 	total := len(data)
 	if total <= 8 {
-		err = fmt.Errorf("Invalid UDP Request")
+		err = fmt.Errorf("Invalid UDP Request: only %d bytes data", total)
 		return
 	}
 	udpReq.Frag = data[2]
 	udpReq.HostType = data[3]
 	pos := 4
 	r := bytes.NewReader(data[pos:])
-	udpReq.DstHost, err = readSocksHost(r, udpReq.HostType)
+	host, e := readSocksHost(r, udpReq.HostType)
 	if err != nil {
-		err = fmt.Errorf("Invalid UDP Request")
+		err = fmt.Errorf("Invalid UDP Request: fail to read dst host: %s", e)
 		return
 	}
-	udpReq.DstPort, err = readSocksPort(r)
+	udpReq.DstHost = host
+	port, e := readSocksPort(r)
 	if err != nil {
-		err = fmt.Errorf("Invalid UDP Request")
+		err = fmt.Errorf("Invalid UDP Request: fail to read dst port: %s", e)
 		return
 	}
+	udpReq.DstPort = port
 	udpReq.Data = data[total-r.Len():]
 	return
 }
@@ -367,6 +369,5 @@ func LegalClientAddr(clientAssociate *net.UDPAddr, addr *net.UDPAddr) bool {
 	if addr.String() == clientAssociate.String() {
 		return true
 	}
-
 	return false
 }

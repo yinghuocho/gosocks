@@ -249,6 +249,7 @@ loop:
 		// validation
 		// 1) RFC1928 Section-7
 		if !LegalClientAddr(clientAssociate, addr) {
+			log.Printf("illegal addr: %s vs %s", clientAssociate.IP.String(), addr.String())
 			continue
 		}
 		// 2) format
@@ -446,63 +447,6 @@ func CopyLoopTimeout(c1 net.Conn, c2 net.Conn, timeout time.Duration) {
 	go copyer(tc1, tc2)
 	go copyer(tc2, tc1)
 	wg.Wait()
-}
-
-// legacy code
-func CopyLoopTimeout1(c1 net.Conn, c2 net.Conn, timeout time.Duration) {
-	c1.SetReadDeadline(time.Time{})
-	c2.SetReadDeadline(time.Time{})
-
-	ch1 := make(chan bool, 5)
-	ch2 := make(chan bool, 5)
-	copyer := func(src net.Conn, dst net.Conn, ch chan<- bool) {
-		// larger buffer when piping between two connections
-		var buf [largeBufSize * 1.75]byte
-		for {
-			nr, er := src.Read(buf[:])
-			if nr > 0 {
-				nw, ew := dst.Write(buf[0:nr])
-				if ew != nil {
-					break
-				}
-				if nr != nw {
-					break
-				}
-				ch <- true
-			}
-			if er != nil {
-				break
-			}
-		}
-		close(ch)
-	}
-
-	go copyer(c1, c2, ch1)
-	go copyer(c2, c1, ch2)
-
-loop:
-	for {
-		t := time.NewTimer(timeout)
-		var ok bool
-		select {
-		case _, ok = <-ch1:
-			if !ok {
-				break loop
-			}
-
-		case _, ok = <-ch2:
-			if !ok {
-				break loop
-			}
-
-		case <-t.C:
-			log.Printf("CopyLoop timeout")
-			break loop
-		}
-		t.Stop()
-	}
-	c1.Close()
-	c2.Close()
 }
 
 func (h *BasicSocksHandler) Quit() {}
